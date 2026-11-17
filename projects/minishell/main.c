@@ -41,6 +41,23 @@ int main(void) {
             break;
         }
 
+        // --- HANDLE 'cd' BUILT-IN ---
+        if (strncmp(input, "cd", 2) == 0) {
+            // Extract the path after "cd "
+            char *path = input + 3;
+
+            // If no path is indicated, default to home directory
+            if (strlen(input) == 2) {
+                path = getenv("HOME");
+            }
+
+            // Call the system's chdir function directly in the parent shell
+            if (chdir(path) != 0) {
+                perror("minishell: cd failed");
+            }
+            continue; // skip fork/exec and loop back to prompt
+        }
+
         // --- NEW: EXECUTION LOGIC ---
         // tokenization (splitting "ls -l" into ["ls", "-l", NULL])
         char *args[64];
@@ -63,7 +80,7 @@ int main(void) {
             // The child process handles Ctrl+C normally
             sa.sa_handler = SIG_DFL;
             sigaction(SIGINT, &sa, NULL);
-            
+
             // Execute the command. If it succeeds, replace the process.
             if (execvp(args[0], args) < 0){
                 printf("minishell: command not found: %s\n", args[0]);
@@ -79,3 +96,5 @@ int main(void) {
 
     return 0;
 }
+
+// https://designed-to-scale.vercel.app
