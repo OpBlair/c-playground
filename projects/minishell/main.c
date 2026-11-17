@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #define MAX_LINE 1024
 
@@ -31,8 +33,36 @@ int main(void) {
             break;
         }
 
-        // echo what they typed
-        printf("You ran: %s\n", input);
+        // --- NEW: EXECUTION LOGIC ---
+        // tokenization (splitting "ls -l" into ["ls", "-l", NULL])
+        char *args[64];
+        int i = 0;
+        char *token = strtok(input, " ");
+        while (token != NULL && i < 63) {
+            args[i++] = token;
+            token = strtok(NULL, " ");
+        }
+        args[i] = NULL; //execvp requires a NULL-terminated array
+
+        // Fork a child procecss
+        pid_t pid = fork();
+
+        if (pid < 0) {
+            perror("Fork failed");
+            exit(1);
+        } else if (pid == 0) {
+            // --- CHILD PROCESS ---
+            // Execute the command. If it succeeds, replace the process.
+            if (execvp(args[0], args) < 0){
+                printf("minishell: command not found: %s\n", args[0]);
+            }
+            exit(1); // Exit child if execvp fails
+        } else {
+            // --- PARENT PROCESS ---
+            // Wait for child process to finish running the command    
+            int status;
+            waitpid(pid, &status, 0);
+        }
     }
 
     return 0;
