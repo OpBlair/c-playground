@@ -4,11 +4,19 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <signal.h>
 
 #define MAX_LINE 1024
 
 int main(void) {
     char input[MAX_LINE];
+
+    // --- IGNORE SIGINT IN THE PARENT SHELL ---
+    struct sigaction sa;
+    sa.sa_handler = SIG_IGN; // tell the shell to ignore Ctrl+C
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
 
     while(1) {
         // print prompt
@@ -52,6 +60,10 @@ int main(void) {
             exit(1);
         } else if (pid == 0) {
             // --- CHILD PROCESS ---
+            // The child process handles Ctrl+C normally
+            sa.sa_handler = SIG_DFL;
+            sigaction(SIGINT, &sa, NULL);
+            
             // Execute the command. If it succeeds, replace the process.
             if (execvp(args[0], args) < 0){
                 printf("minishell: command not found: %s\n", args[0]);
