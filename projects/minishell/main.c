@@ -11,6 +11,12 @@
 int main(void) {
     char input[MAX_LINE];
 
+    // --- START AT THE ROOT DIRECTORY OF THE OS ---
+    char *home_dir = getenv("HOME");
+    if (chdir("/") != 0) {
+        perror("minishell: failed to change to root directory");
+    }
+
     // --- IGNORE SIGINT IN THE PARENT SHELL ---
     struct sigaction sa;
     sa.sa_handler = SIG_IGN; // tell the shell to ignore Ctrl+C
@@ -19,8 +25,15 @@ int main(void) {
     sigaction(SIGINT, &sa, NULL);
 
     while(1) {
-        // print prompt
-        printf("minishell> ");
+        // --- FETCH CURRENT WORKING DIRECTORY ---
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            printf("minishell:%s$", cwd);
+        } else {
+            // print prompt
+            printf("minishell> ");
+        }
+        
         fflush(stdout);
 
         // Read input
