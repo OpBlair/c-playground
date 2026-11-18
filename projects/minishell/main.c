@@ -17,6 +17,11 @@ int main(void) {
         perror("minishell: failed to change to root directory");
     }
 
+    // --- SET TERMINAL CURSOR TO A BLINKING UNDERSCORE ---
+    // \0333[3 q = Blinking underline cursor shape]
+    printf("\033[3 q");
+    fflush(stdout);
+
     // --- IGNORE SIGINT IN THE PARENT SHELL ---
     struct sigaction sa;
     sa.sa_handler = SIG_IGN; // tell the shell to ignore Ctrl+C
@@ -109,5 +114,3 @@ int main(void) {
 
     return 0;
 }
-
-// https://designed-to-scale.vercel.app
