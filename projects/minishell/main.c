@@ -12,13 +12,12 @@ int main(void) {
     char input[MAX_LINE];
 
     // --- START AT THE ROOT DIRECTORY OF THE OS ---
-    char *home_dir = getenv("HOME");
     if (chdir("/") != 0) {
         perror("minishell: failed to change to root directory");
     }
 
     // --- SET TERMINAL CURSOR TO A BLINKING UNDERSCORE ---
-    // \0333[3 q = Blinking underline cursor shape]
+    // \033[3 q = Blinking underline cursor shape]
     printf("\033[3 q");
     fflush(stdout);
 
@@ -33,7 +32,7 @@ int main(void) {
         // --- FETCH CURRENT WORKING DIRECTORY ---
         char cwd[1024];
         if (getcwd(cwd, sizeof(cwd)) != NULL) {
-            printf("minishell:%s$", cwd);
+            printf("minishell:%s$ ", cwd);
         } else {
             // print prompt
             printf("minishell> ");
@@ -60,13 +59,27 @@ int main(void) {
         }
 
         // --- HANDLE 'cd' BUILT-IN ---
-        if (strncmp(input, "cd", 2) == 0) {
+        if (strcmp(input, "cd") == 0 || strncmp(input, "cd ", 3) == 0 ||  strncmp(input, "cd\t", 3) == 0) {
             // Extract the path after "cd "
-            char *path = input + 3;
+            char *path = input + 2;
 
-            // If no path is indicated, default to home directory
-            if (strlen(input) == 2) {
+            // skip any tabs or spaces after "cd"
+            while (*path == ' ' || *path == '\t'){
+                path++;
+            } 
+
+            // Trim trailing spaces or tabs
+            size_t len = strlen(path);
+            while (len > 0 && (path[len - 1] == ' ' || path[len - 1] == '\t')){
+                path[--len] = '\0';
+            }
+
+            // Default to HOME (or "/" if HOME is unset)
+            if (*path == '\0') {
                 path = getenv("HOME");
+                if (path == NULL) {
+                    path = "/";
+                }
             }
 
             // Call the system's chdir function directly in the parent shell
@@ -76,7 +89,7 @@ int main(void) {
             continue; // skip fork/exec and loop back to prompt
         }
 
-        // --- NEW: EXECUTION LOGIC ---
+        // --- EXECUTION LOGIC ---
         // tokenization (splitting "ls -l" into ["ls", "-l", NULL])
         char *args[64];
         int i = 0;
