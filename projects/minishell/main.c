@@ -8,6 +8,11 @@
 
 #define MAX_LINE 1024
 
+static void reset_cursor(void){
+    printf("\033[0 q");
+    fflush(stdout);
+}
+
 int main(void) {
     char input[MAX_LINE];
 
@@ -20,6 +25,7 @@ int main(void) {
     // \033[3 q = Blinking underline cursor shape]
     printf("\033[3 q");
     fflush(stdout);
+    atexit(reset_cursor);
 
     // --- IGNORE SIGINT IN THE PARENT SHELL ---
     struct sigaction sa;
