@@ -15,6 +15,7 @@ static void reset_cursor(void){
 
 int main(void) {
     char input[MAX_LINE];
+    char prev_dir[MAX_LINE] = "";
 
     // --- START AT THE ROOT DIRECTORY OF THE OS ---
     if (chdir("/") != 0) {
@@ -81,16 +82,41 @@ int main(void) {
             }
 
             // Default to HOME (or "/" if HOME is unset)
+            int print_dir = 0;
             if (*path == '\0') {
+                // Standard POSIX: `cd` alone goes to $HOME
                 path = getenv("HOME");
                 if (path == NULL) {
                     path = "/";
                 }
+            } else if (strcmp(path, "-") == 0) {
+                // switch to previous working directory
+                if (prev_dir[0] == '\0') {
+                    fprintf(stderr, "minishell: cd: OLDPWD not set\n");
+                    continue;
+                }
+                path = prev_dir;
+                print_dir = 1;
             }
+
+            char current_before_cd[MAX_LINE];
+            int have_old = (getcwd(current_before_cd, sizeof(current_before_cd)) != NULL);
 
             // Call the system's chdir function directly in the parent shell
             if (chdir(path) != 0) {
                 perror("minishell: cd failed");
+                continue;
+            }
+
+            if (have_old) {
+                snprintf(prev_dir, sizeof(prev_dir), "%s", current_before_cd);
+            }
+
+            if (print_dir) {
+                char now_dir[MAX_LINE];
+                if (getcwd(now_dir, sizeof(now_dir)) != NULL){
+                    printf("%s\n", now_dir);
+                }
             }
             continue; // skip fork/exec and loop back to prompt
         }
