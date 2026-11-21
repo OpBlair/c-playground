@@ -7,10 +7,66 @@
 #include <signal.h>
 
 #define MAX_LINE 1024
+#define MAX_ARGS 64
 
+// Function to reset cursor from _ to system default
 static void reset_cursor(void){
     printf("\033[0 q");
     fflush(stdout);
+}
+
+// Function for parsing quotes
+int parse_command(char *input, char **args){
+    int arg_count = 0;
+    char *p = input;
+
+    while (*p != '\0' && arg_count < MAX_ARGS - 1) {
+        // skip leading whitespaces (spaces and tabs)
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+
+        // Mark the start of the token, and use 'dest' to build
+        // the cleaned string in-place (stripping quotes)
+        args[arg_count++] = p;
+        char *dest = p;
+
+        int in_single_quotes = 0;
+        int in_double_quotes = 0;
+
+        while (*p != '\0') {
+            // Handle single quotes
+            if (*p == '\'' && !in_double_quotes) {
+                in_single_quotes = !in_single_quotes;
+                p++; // skip the quote character
+                continue;
+            }
+            // Handle double quotes
+            if (*p == '\"' && !in_single_quotes) {
+                in_double_quotes = !in_double_quotes;
+                p++; // skip the quote character
+                continue;
+            }
+
+            // If a whitespace is hit outside of quotes, end the token
+            if ((*p == ' ' || *p == '\t') && !in_single_quotes && !in_double_quotes) {
+                p++; // Advance past the space
+                break;
+            }
+
+            // copy character to destination (shitfs left if quotes were removed)
+            *dest++ = *p++;
+        }
+
+        // Null-terminate the token
+        *dest = '\0';
+    }
+
+    args[arg_count] = NULL; // Required for execvp
+    return arg_count; // Return safely after all tokens are parsed
 }
 
 int main(void) {
@@ -123,7 +179,15 @@ int main(void) {
 
         // --- EXECUTION LOGIC ---
         // tokenization (splitting "ls -l" into ["ls", "-l", NULL])
-        char *args[64];
+        char *args[MAX_ARGS];
+        parse_command(input, args);
+
+        // if the line was just spaces/empty after parsing, loop again
+        if (args[0] == NULL) {
+            continue;
+        }
+        
+        /*
         int i = 0;
         char *token = strtok(input, " ");
         while (token != NULL && i < 63) {
@@ -131,7 +195,8 @@ int main(void) {
             token = strtok(NULL, " ");
         }
         args[i] = NULL; //execvp requires a NULL-terminated array
-
+        */
+        
         // Fork a child procecss
         pid_t pid = fork();
 
@@ -159,3 +224,4 @@ int main(void) {
 
     return 0;
 }
+// strtok
