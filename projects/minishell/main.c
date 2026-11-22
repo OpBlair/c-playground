@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <errno.h> // needed for EINTR check in waitpid
 
 #define MAX_LINE 1024
 #define MAX_ARGS 64
@@ -69,6 +70,48 @@ int parse_command(char *input, char **args){
     return arg_count; // Return safely after all tokens are parsed
 }
 
+// Function to handle `cd`
+static void handle_cd(char **args, char *prev_dir, size_t prev_dir_size) {
+    const char *target = NULL;
+    int print_dir = 0;
+
+    if (args[1] == NULL) {
+        // `cd` alone goes to $HOME, or "/" if unset
+        target = getenv("HOME");
+        if (target == NULL || *target == '\0') {
+            target = "/";
+        }
+    } else if (strcmp(args[1], "-") == 0) {
+        if (prev_dir[0] == '\0') {
+            fprintf(stderr, "minishell: cd: OLDPWD not set\n");
+            return;
+        }
+        target = prev_dir;
+        print_dir = 1;
+    } else {
+        target = args[1];
+    }
+
+    char current_before_cd[MAX_LINE];
+    int have_old = (getcwd(current_before_cd, sizeof(current_before_cd)) != NULL);
+
+    if (chdir(target) != 0) {
+        perror("minishell: cd failed");
+        return;
+    }
+
+    if (have_old) {
+        snprintf(prev_dir, prev_dir_size, "%s", current_before_cd);
+    }
+
+    if (print_dir) {
+        char now_dir[MAX_LINE];
+        if (getcwd(now_dir, sizeof(now_dir)) != NULL) {
+            printf("%s\n", now_dir);
+        }
+    }
+}
+
 int main(void) {
     char input[MAX_LINE];
     char prev_dir[MAX_LINE] = "";
@@ -116,69 +159,7 @@ int main(void) {
             continue;
         }
 
-        // if user types 'exit', quit the shell
-        if (strcmp(input, "exit") == 0) {
-            break;
-        }
-
-        // --- HANDLE 'cd' BUILT-IN ---
-        if (strcmp(input, "cd") == 0 || strncmp(input, "cd ", 3) == 0 ||  strncmp(input, "cd\t", 3) == 0) {
-            // Extract the path after "cd "
-            char *path = input + 2;
-
-            // skip any tabs or spaces after "cd"
-            while (*path == ' ' || *path == '\t'){
-                path++;
-            } 
-
-            // Trim trailing spaces or tabs
-            size_t len = strlen(path);
-            while (len > 0 && (path[len - 1] == ' ' || path[len - 1] == '\t')){
-                path[--len] = '\0';
-            }
-
-            // Default to HOME (or "/" if HOME is unset)
-            int print_dir = 0;
-            if (*path == '\0') {
-                // Standard POSIX: `cd` alone goes to $HOME
-                path = getenv("HOME");
-                if (path == NULL) {
-                    path = "/";
-                }
-            } else if (strcmp(path, "-") == 0) {
-                // switch to previous working directory
-                if (prev_dir[0] == '\0') {
-                    fprintf(stderr, "minishell: cd: OLDPWD not set\n");
-                    continue;
-                }
-                path = prev_dir;
-                print_dir = 1;
-            }
-
-            char current_before_cd[MAX_LINE];
-            int have_old = (getcwd(current_before_cd, sizeof(current_before_cd)) != NULL);
-
-            // Call the system's chdir function directly in the parent shell
-            if (chdir(path) != 0) {
-                perror("minishell: cd failed");
-                continue;
-            }
-
-            if (have_old) {
-                snprintf(prev_dir, sizeof(prev_dir), "%s", current_before_cd);
-            }
-
-            if (print_dir) {
-                char now_dir[MAX_LINE];
-                if (getcwd(now_dir, sizeof(now_dir)) != NULL){
-                    printf("%s\n", now_dir);
-                }
-            }
-            continue; // skip fork/exec and loop back to prompt
-        }
-
-        // --- EXECUTION LOGIC ---
-        // tokenization (splitting "ls -l" into ["ls", "-l", NULL])
+        // Parse before built-ins so quoted paths (like cd "my dir") are unquoted
         char *args[MAX_ARGS];
         parse_command(input, args);
 
@@ -186,6 +167,21 @@ int main(void) {
         if (args[0] == NULL) {
             continue;
         }
+
+        // if user types 'exit', quit the shell
+        if (strcmp(args[0], "exit") == 0) {
+            break;
+        }
+
+        // --- HANDLE 'cd' BUILT-IN ---
+        if (strcmp(args[0], "cd") == 0) {
+            handle_cd(args, prev_dir, sizeof(prev_dir));
+            continue; // skip fork/exec and loop back to prompt
+        }
+
+        // --- EXECUTION LOGIC ---
+        // tokenization (splitting "ls -l" into ["ls", "-l", NULL])
+        // (moved above built-ins so `cd` can use parsed arguments)
         
         /*
         int i = 0;
@@ -202,7 +198,7 @@ int main(void) {
 
         if (pid < 0) {
             perror("Fork failed");
-            exit(1);
+            continue; // stay in shell instead of exiting on fork error
         } else if (pid == 0) {
             // --- CHILD PROCESS ---
             // The child process handles Ctrl+C normally
@@ -213,15 +209,28 @@ int main(void) {
             if (execvp(args[0], args) < 0){
                 printf("minishell: command not found: %s\n", args[0]);
             }
-            exit(1); // Exit child if execvp fails
+            _exit(127); // Exit child without flushing parent stdio buffers
         } else {
             // --- PARENT PROCESS ---
             // Wait for child process to finish running the command    
             int status;
-            waitpid(pid, &status, 0);
+            while (waitpid(pid, &status, 0) < 0) {
+                if (errno != EINTR) {
+                    perror("minishell: waitpid failed");
+                    break;
+                }
+            }
+            if (WIFSIGNALED(status)) {
+                printf("\n"); // keep prompt on a new line after signal kill
+            }
         }
     }
 
     return 0;
 }
+
+// https://designed-to-scale.vercel.app
 // strtok
+/*
+canonical mode, raw mode
+*/
