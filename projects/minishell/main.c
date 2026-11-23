@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <errno.h> // needed for EINTR check in waitpid
+#include <fcntl.h> // IO redirection header file
 
 #define MAX_LINE 1024
 #define MAX_ARGS 64
@@ -112,6 +113,100 @@ static void handle_cd(char **args, char *prev_dir, size_t prev_dir_size) {
     }
 }
 
+// --- IO REDIRECTION (<, >, >>) ---
+typedef enum {
+    REDIR_IN,       // <  : read stdin from file
+    REDIR_OUT,      // >  : write stdout to file (truncate/create)
+    REDIR_APPEND,   // >> : append stdout to file (create if missing)
+} RedirType;
+
+typedef struct {
+    RedirType type; // which redirection operator was used
+    char *file;     // target file path
+} Redirection;
+
+#define MAX_REDIRS 16 // max redirections allowed per command
+
+// Extracts `<`, `>`, and `>>` tokens from `args` in-place, recording them in
+// left-to-right order in `redirs`. Returns count (>= 0), or -1 on syntax error.
+static int extract_redirections(char **args, Redirection *redirs, int max_redirs) {
+    int read_idx = 0;
+    int write_idx = 0;   // compacts non-redirection args back into `args`
+    int redir_count = 0;
+
+    while (args[read_idx] != NULL) {
+        int is_in = (strcmp(args[read_idx], "<") == 0);
+        int is_append = (strcmp(args[read_idx], ">>") == 0);
+        int is_out = (strcmp(args[read_idx], ">") == 0);
+
+        if (is_in || is_append || is_out) {
+            // Redirection operator must be followed by a filename
+            if (args[read_idx + 1] == NULL) {
+                fprintf(stderr, "minishell: syntax error near unexpected token `newline'\n");
+                return -1;
+            }
+            // Guard against overflowing the fixed `redirs` array
+            if (redir_count >= max_redirs) {
+                fprintf(stderr, "minishell: too many redirections\n");
+                return -1;
+            }
+
+            RedirType t = is_in ? REDIR_IN : (is_append ? REDIR_APPEND : REDIR_OUT);
+            redirs[redir_count].type = t;
+            redirs[redir_count].file = args[read_idx + 1];
+            redir_count++;
+
+            read_idx += 2; // skip both the operator and target filename
+            continue;
+        }
+
+        // Keep normal command/argument tokens so execvp gets clean argv
+        args[write_idx++] = args[read_idx++];
+    }
+
+    args[write_idx] = NULL; // re-terminate cleaned args array for execvp
+    return redir_count;
+}
+
+// Applies recorded redirections inside the child process before execvp().
+// Returns 0 on success, -1 if open() or dup2() fails.
+static int apply_redirections(const Redirection *redirs, int redir_count) {
+    for (int i = 0; i < redir_count; i++) {
+        int fd = -1;
+        int target_fd = -1;
+
+        if (redirs[i].type == REDIR_IN) {
+            fd = open(redirs[i].file, O_RDONLY);
+            target_fd = STDIN_FILENO; // redirect stdin (fd 0)
+        } else if (redirs[i].type == REDIR_OUT) {
+            // 0644 = rw-r--r-- permissions when creating a new file
+            fd = open(redirs[i].file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            target_fd = STDOUT_FILENO; // redirect stdout (fd 1)
+        } else { // REDIR_APPEND
+            fd = open(redirs[i].file, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            target_fd = STDOUT_FILENO; // redirect stdout (fd 1)
+        }
+
+        if (fd < 0) {
+            perror(redirs[i].file);
+            return -1;
+        }
+
+        // Point standard fd (stdin/stdout) at the opened file
+        if (dup2(fd, target_fd) < 0) {
+            perror("minishell: dup2 failed");
+            close(fd);
+            return -1;
+        }
+
+        close(fd); // close original fd; duplicated fd stays active across execvp
+    }
+
+    return 0;
+}
+
+// --- IO REDIRECTION ENDS ---
+
 int main(void) {
     char input[MAX_LINE];
     char prev_dir[MAX_LINE] = "";
@@ -192,6 +287,17 @@ int main(void) {
         }
         args[i] = NULL; //execvp requires a NULL-terminated array
         */
+
+        // Extract `<`, `>`, and `>>` before forking so syntax errors don't spawn children
+        Redirection redirs[MAX_REDIRS];
+        int redir_count = extract_redirections(args, redirs, MAX_REDIRS);
+        if (redir_count < 0) {
+            continue;
+        }
+        // Skip execution if line only contained redirections (e.g., `> out.txt`)
+        if (args[0] == NULL) {
+            continue;
+        }
         
         // Fork a child procecss
         pid_t pid = fork();
@@ -204,6 +310,11 @@ int main(void) {
             // The child process handles Ctrl+C normally
             sa.sa_handler = SIG_DFL;
             sigaction(SIGINT, &sa, NULL);
+
+            // Apply redirections in child only so parent shell's stdin/stdout stay intact
+            if (apply_redirections(redirs, redir_count) < 0) {
+                _exit(1);
+            }
 
             // Execute the command. If it succeeds, replace the process.
             if (execvp(args[0], args) < 0){
