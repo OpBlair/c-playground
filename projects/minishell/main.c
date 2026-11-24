@@ -207,6 +207,155 @@ static int apply_redirections(const Redirection *redirs, int redir_count) {
 
 // --- IO REDIRECTION ENDS ---
 
+// --- HANDLE PIPELINE -----
+#define MAX_PIPELINE_STAGES 32
+
+static void handle_pipeline(char **args) {
+    char *stages[MAX_PIPELINE_STAGES][MAX_ARGS];
+    int stage_count = 0;
+    int arg_in_stage = 0;
+
+    // 1. Split `args` on unquoted "|" tokens into separate command argvs
+    for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], "|") == 0) {
+            if (arg_in_stage == 0) {
+                fprintf(stderr, "minishell: syntax error near unexpected token `|'\n");
+                return;
+            }
+            if (stage_count >= MAX_PIPELINE_STAGES - 1) {
+                fprintf(stderr, "minishell: too many pipeline stages\n");
+                return;
+            }
+            stages[stage_count][arg_in_stage] = NULL;
+            stage_count++;
+            arg_in_stage = 0;
+        } else {
+            if (arg_in_stage >= MAX_ARGS - 1) {
+                fprintf(stderr, "minishell: too many arguments in stage\n");
+                return;
+            }
+            stages[stage_count][arg_in_stage++] = args[i];
+        }
+    }
+
+    // Reject trailing "|" (e.g., `ls |`)
+    if (arg_in_stage == 0) {
+        fprintf(stderr, "minishell: syntax error near unexpected token `newline'\n");
+        return;
+    }
+    stages[stage_count][arg_in_stage] = NULL;
+    stage_count++;
+
+    pid_t pids[MAX_PIPELINE_STAGES];
+    int prev_read_fd = -1;
+    int spawned = 0;
+
+    // 2. Wire pipes and fork each stage
+    for (int i = 0; i < stage_count; i++) {
+        int pipefd[2] = {-1, -1};
+        int has_next = (i < stage_count - 1);
+
+        if (has_next && pipe(pipefd) < 0) {
+            perror("minishell: pipe failed");
+            if (prev_read_fd != -1) {
+                close(prev_read_fd);
+            }
+            break;
+        }
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("minishell: fork failed");
+            if (prev_read_fd != -1) {
+                close(prev_read_fd);
+            }
+            if (has_next) {
+                close(pipefd[0]);
+                close(pipefd[1]);
+            }
+            break;
+        }
+
+        if (pid == 0) {
+            // --- CHILD PROCESS ---
+            struct sigaction sa;
+            sa.sa_handler = SIG_DFL;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = 0;
+            sigaction(SIGINT, &sa, NULL);
+
+            // Connect stdin to previous stage's pipe read end
+            if (prev_read_fd != -1) {
+                if (dup2(prev_read_fd, STDIN_FILENO) < 0) {
+                    perror("minishell: dup2 failed");
+                    _exit(1);
+                }
+                close(prev_read_fd);
+            }
+
+            // Connect stdout to current stage's pipe write end
+            if (has_next) {
+                close(pipefd[0]); // child does not read its own output pipe
+                if (dup2(pipefd[1], STDOUT_FILENO) < 0) {
+                    perror("minishell: dup2 failed");
+                    _exit(1);
+                }
+                close(pipefd[1]);
+            }
+
+            // Extract and apply stage-local `<`, `>`, `>>` redirections
+            Redirection redirs[MAX_REDIRS];
+            int redir_count = extract_redirections(stages[i], redirs, MAX_REDIRS);
+            if (redir_count < 0) {
+                _exit(1);
+            }
+            if (stages[i][0] == NULL) {
+                _exit(0);
+            }
+            if (apply_redirections(redirs, redir_count) < 0) {
+                _exit(1);
+            }
+
+            execvp(stages[i][0], stages[i]);
+            fprintf(stderr, "minishell: command not found: %s\n", stages[i][0]);
+            _exit(127);
+        }
+
+        // --- PARENT PROCESS ---
+        if (prev_read_fd != -1) {
+            close(prev_read_fd); // done with prior stage's read fd
+        }
+        if (has_next) {
+            close(pipefd[1]); // critical: close write fd so downstream readers see EOF
+            prev_read_fd = pipefd[0]; // pass read fd into next iteration
+        } else {
+            prev_read_fd = -1;
+        }
+
+        pids[spawned++] = pid;
+    }
+
+    // 3. Wait for all spawned child processes
+    int last_signaled = 0;
+    for (int i = 0; i < spawned; i++) {
+        int status;
+        while (waitpid(pids[i], &status, 0) < 0) {
+            if (errno != EINTR) {
+                perror("minishell: waitpid failed");
+                break;
+            }
+        }
+        if (WIFSIGNALED(status)) {
+            last_signaled = 1;
+        }
+    }
+
+    if (last_signaled) {
+        printf("\n");
+    }
+}
+// ---- END HANDLE PIPELINE ----
+
 int main(void) {
     char input[MAX_LINE];
     char prev_dir[MAX_LINE] = "";
@@ -287,6 +436,20 @@ int main(void) {
         }
         args[i] = NULL; //execvp requires a NULL-terminated array
         */
+
+        // Handle Pipeline (|)
+        int has_pipe = 0;
+        for (int i = 0; args[i] != NULL; i++) {
+            if (strcmp(args[i], "|") == 0) {
+                has_pipe = 1;
+                break;
+            }
+        }
+
+        if (has_pipe) {
+            handle_pipeline(args);
+            continue;
+        }
 
         // Extract `<`, `>`, and `>>` before forking so syntax errors don't spawn children
         Redirection redirs[MAX_REDIRS];
