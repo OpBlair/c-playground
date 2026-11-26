@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,89 @@
 static void reset_cursor(void){
     printf("\033[0 q");
     fflush(stdout);
+}
+
+// Helper for valid shell variable / identifier first character
+static int is_valid_var_start(char c) {
+    return isalpha((unsigned char)c) || c == '_';
+}
+
+// Helper for valid subsequent characters in a shell variable / identifier
+static int is_valid_var_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+// Expand $VAR using getenv() into `out` while keeping single-quoted $VAR literal
+static int expand_vars(const char *input, char *out, size_t out_size) {
+    size_t in_idx = 0;
+    size_t out_idx = 0;
+    int in_single_quotes = 0;
+    int in_double_quotes = 0;
+
+    while (input[in_idx] != '\0') {
+        char c = input[in_idx];
+
+        // Track single quotes unless already inside double quotes
+        if (c == '\'' && !in_double_quotes) {
+            in_single_quotes = !in_single_quotes;
+            if (out_idx + 1 >= out_size) return -1;
+            out[out_idx++] = c;
+            in_idx++;
+            continue;
+        }
+
+        // Track double quotes unless already inside single quotes
+        if (c == '"' && !in_single_quotes) {
+            in_double_quotes = !in_double_quotes;
+            if (out_idx + 1 >= out_size) return -1;
+            out[out_idx++] = c;
+            in_idx++;
+            continue;
+        }
+
+        // Expand $VAR outside single quotes (both unquoted and double-quoted)
+        if (c == '$' && !in_single_quotes && is_valid_var_start(input[in_idx + 1])) {
+            size_t start = in_idx + 1;
+            size_t end = start;
+            while (is_valid_var_char(input[end])) {
+                end++;
+            }
+
+            size_t name_len = end - start;
+            char var_name[256];
+            if (name_len >= sizeof(var_name)) {
+                fprintf(stderr, "minishell: variable name too long\n");
+                return -1;
+            }
+            memcpy(var_name, input + start, name_len);
+            var_name[name_len] = '\0';
+
+            // Look up variable value; unset variables expand to nothing
+            const char *val = getenv(var_name);
+            if (val != NULL) {
+                size_t val_len = strlen(val);
+                if (out_idx + val_len >= out_size) {
+                    fprintf(stderr, "minishell: expanded line too long\n");
+                    return -1;
+                }
+                memcpy(out + out_idx, val, val_len);
+                out_idx += val_len;
+            }
+
+            in_idx = end;
+            continue;
+        }
+
+        if (out_idx + 1 >= out_size) {
+            fprintf(stderr, "minishell: input line too long\n");
+            return -1;
+        }
+        out[out_idx++] = c;
+        in_idx++;
+    }
+
+    out[out_idx] = '\0';
+    return 0;
 }
 
 // Function for parsing quotes
@@ -69,6 +153,118 @@ int parse_command(char *input, char **args){
 
     args[arg_count] = NULL; // Required for execvp
     return arg_count; // Return safely after all tokens are parsed
+}
+
+// Built-in `pwd` using getcwd()
+static void print_pwd(void) {
+    char buf[MAX_LINE];
+    if (getcwd(buf, sizeof(buf)) != NULL) {
+        printf("%s\n", buf);
+    } else {
+        perror("minishell: pwd");
+    }
+}
+
+// Built-in `echo` supporting one or more leading "-n" flags
+static void print_echo(char *const args[]) {
+    int i = 1;
+    int print_newline = 1;
+
+    // handle one or more leading "-n" flags
+    while (args[i] != NULL && strcmp(args[i], "-n") == 0) {
+        print_newline = 0;
+        i++;
+    }
+
+    // Print remaining arguments separated by a single space
+    while (args[i] != NULL) {
+        fputs(args[i], stdout);
+        if (args[i + 1] != NULL) {
+            putchar(' ');
+        }
+        i++;
+    }
+
+    if (print_newline) {
+        putchar('\n');
+    }
+    fflush(stdout);
+}
+
+// Validate identifier syntax for `export` and `unset`
+static int is_valid_identifier(const char *name) {
+    if (name == NULL || !is_valid_var_start(name[0])) {
+        return 0;
+    }
+    for (size_t i = 1; name[i] != '\0'; i++) {
+        if (!is_valid_var_char(name[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// Built-in `export`: sets environment variables with setenv() or lists `environ`
+static void handle_export(char *const args[]) {
+    if (args[1] == NULL) {
+        extern char **environ;
+        for (int i = 0; environ != NULL && environ[i] != NULL; i++) {
+            printf("declare -x %s\n", environ[i]);
+        }
+        return;
+    }
+
+    for (int i = 1; args[i] != NULL; i++) {
+        char *eq = strchr(args[i], '=');
+        if (eq != NULL) {
+            size_t name_len = (size_t)(eq - args[i]);
+            char name[256];
+            if (name_len == 0 || name_len >= sizeof(name)) {
+                fprintf(stderr, "minishell: export: `%s': not a valid identifier\n", args[i]);
+                continue;
+            }
+            memcpy(name, args[i], name_len);
+            name[name_len] = '\0';
+
+            if (!is_valid_identifier(name)) {
+                fprintf(stderr, "minishell: export: `%s': not a valid identifier\n", args[i]);
+                continue;
+            }
+
+            if (setenv(name, eq + 1, 1) != 0) {
+                perror("minishell: export");
+            }
+        } else {
+            if (!is_valid_identifier(args[i])) {
+                fprintf(stderr, "minishell: export: `%s': not a valid identifier\n", args[i]);
+                continue;
+            }
+            // Preserve existing value if already set; otherwise initialize empty
+            if (getenv(args[i]) == NULL) {
+                if (setenv(args[i], "", 0) != 0) {
+                    perror("minishell: export");
+                }
+            }
+        }
+    }
+}
+
+// Built-in `unset`: removes environment variables with unsetenv()
+static void handle_unset(char *const args[]) {
+    if (args[1] == NULL) {
+        fprintf(stderr, "minishell: unset: not enough arguments\n");
+        return;
+    }
+
+    for (int i = 1; args[i] != NULL; i++) {
+        if (!is_valid_identifier(args[i])) {
+            fprintf(stderr, "minishell: unset: `%s': not a valid identifier\n", args[i]);
+            continue;
+        }
+        if (unsetenv(args[i]) != 0) {
+            perror("minishell: unset");
+        }
+    }
 }
 
 // Function to handle `cd`
@@ -205,6 +401,43 @@ static int apply_redirections(const Redirection *redirs, int redir_count) {
     return 0;
 }
 
+// Fork a child so `pwd` or `echo` redirections don't mutate the parent shell's fds
+static int run_redirected_output_builtin(char **args, const Redirection *redirs, int redir_count) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("Fork failed");
+        return -1;
+    }
+
+    if (pid == 0) {
+        struct sigaction sa;
+        sa.sa_handler = SIG_DFL;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGINT, &sa, NULL);
+
+        if (apply_redirections(redirs, redir_count) < 0) {
+            _exit(1);
+        }
+
+        if (strcmp(args[0], "pwd") == 0) {
+            print_pwd();
+        } else if (strcmp(args[0], "echo") == 0) {
+            print_echo(args);
+        }
+        _exit(0);
+    }
+
+    int status;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            perror("minishell: waitpid failed");
+            break;
+        }
+    }
+    return 0;
+}
+
 // --- IO REDIRECTION ENDS ---
 
 // --- HANDLE PIPELINE -----
@@ -316,6 +549,16 @@ static void handle_pipeline(char **args) {
                 _exit(1);
             }
 
+            // Support `pwd` and `echo` inside pipeline stages
+            if (strcmp(stages[i][0], "pwd") == 0) {
+                print_pwd();
+                _exit(0);
+            }
+            if (strcmp(stages[i][0], "echo") == 0) {
+                print_echo(stages[i]);
+                _exit(0);
+            }
+
             execvp(stages[i][0], stages[i]);
             fprintf(stderr, "minishell: command not found: %s\n", stages[i][0]);
             _exit(127);
@@ -356,8 +599,12 @@ static void handle_pipeline(char **args) {
 }
 // ---- END HANDLE PIPELINE ----
 
+// ---- HANDLE VAR ------
+
+// ---- END HANDLE VAR ----
 int main(void) {
     char input[MAX_LINE];
+    char expanded[MAX_LINE];
     char prev_dir[MAX_LINE] = "";
 
     // --- START AT THE ROOT DIRECTORY OF THE OS ---
@@ -403,9 +650,14 @@ int main(void) {
             continue;
         }
 
+        // Expand $VAR before quote stripping so quote boundaries stay clear
+        if (expand_vars(input, expanded, sizeof(expanded)) < 0) {
+            continue;
+        }
+
         // Parse before built-ins so quoted paths (like cd "my dir") are unquoted
         char *args[MAX_ARGS];
-        parse_command(input, args);
+        parse_command(expanded, args);
 
         // if the line was just spaces/empty after parsing, loop again
         if (args[0] == NULL) {
@@ -421,6 +673,16 @@ int main(void) {
         if (strcmp(args[0], "cd") == 0) {
             handle_cd(args, prev_dir, sizeof(prev_dir));
             continue; // skip fork/exec and loop back to prompt
+        }
+
+        // --- HANDLE 'export' AND 'unset' BUILT-INS (PARENT PROCESS) ---
+        if (strcmp(args[0], "export") == 0) {
+            handle_export(args);
+            continue;
+        }
+        if (strcmp(args[0], "unset") == 0) {
+            handle_unset(args);
+            continue;
         }
 
         // --- EXECUTION LOGIC ---
@@ -459,6 +721,24 @@ int main(void) {
         }
         // Skip execution if line only contained redirections (e.g., `> out.txt`)
         if (args[0] == NULL) {
+            continue;
+        }
+
+        // Run `pwd` and `echo` directly, or fork when redirecting output
+        if (strcmp(args[0], "pwd") == 0) {
+            if (redir_count > 0) {
+                run_redirected_output_builtin(args, redirs, redir_count);
+            } else {
+                print_pwd();
+            }
+            continue;
+        }
+        if (strcmp(args[0], "echo") == 0) {
+            if (redir_count > 0) {
+                run_redirected_output_builtin(args, redirs, redir_count);
+            } else {
+                print_echo(args);
+            }
             continue;
         }
         
