@@ -8,97 +8,19 @@
 #include <signal.h>
 #include <errno.h> // needed for EINTR check in waitpid
 #include <fcntl.h> // IO redirection header file
+#include <readline/readline.h>
+#include <readline/history.h>
 
 #define MAX_LINE 1024
 #define MAX_ARGS 64
+
+static int is_valid_var_start(char c);
+static int is_valid_var_char(char c);
 
 // Function to reset cursor from _ to system default
 static void reset_cursor(void){
     printf("\033[0 q");
     fflush(stdout);
-}
-
-// Helper for valid shell variable / identifier first character
-static int is_valid_var_start(char c) {
-    return isalpha((unsigned char)c) || c == '_';
-}
-
-// Helper for valid subsequent characters in a shell variable / identifier
-static int is_valid_var_char(char c) {
-    return isalnum((unsigned char)c) || c == '_';
-}
-
-// Expand $VAR using getenv() into `out` while keeping single-quoted $VAR literal
-static int expand_vars(const char *input, char *out, size_t out_size) {
-    size_t in_idx = 0;
-    size_t out_idx = 0;
-    int in_single_quotes = 0;
-    int in_double_quotes = 0;
-
-    while (input[in_idx] != '\0') {
-        char c = input[in_idx];
-
-        // Track single quotes unless already inside double quotes
-        if (c == '\'' && !in_double_quotes) {
-            in_single_quotes = !in_single_quotes;
-            if (out_idx + 1 >= out_size) return -1;
-            out[out_idx++] = c;
-            in_idx++;
-            continue;
-        }
-
-        // Track double quotes unless already inside single quotes
-        if (c == '"' && !in_single_quotes) {
-            in_double_quotes = !in_double_quotes;
-            if (out_idx + 1 >= out_size) return -1;
-            out[out_idx++] = c;
-            in_idx++;
-            continue;
-        }
-
-        // Expand $VAR outside single quotes (both unquoted and double-quoted)
-        if (c == '$' && !in_single_quotes && is_valid_var_start(input[in_idx + 1])) {
-            size_t start = in_idx + 1;
-            size_t end = start;
-            while (is_valid_var_char(input[end])) {
-                end++;
-            }
-
-            size_t name_len = end - start;
-            char var_name[256];
-            if (name_len >= sizeof(var_name)) {
-                fprintf(stderr, "minishell: variable name too long\n");
-                return -1;
-            }
-            memcpy(var_name, input + start, name_len);
-            var_name[name_len] = '\0';
-
-            // Look up variable value; unset variables expand to nothing
-            const char *val = getenv(var_name);
-            if (val != NULL) {
-                size_t val_len = strlen(val);
-                if (out_idx + val_len >= out_size) {
-                    fprintf(stderr, "minishell: expanded line too long\n");
-                    return -1;
-                }
-                memcpy(out + out_idx, val, val_len);
-                out_idx += val_len;
-            }
-
-            in_idx = end;
-            continue;
-        }
-
-        if (out_idx + 1 >= out_size) {
-            fprintf(stderr, "minishell: input line too long\n");
-            return -1;
-        }
-        out[out_idx++] = c;
-        in_idx++;
-    }
-
-    out[out_idx] = '\0';
-    return 0;
 }
 
 // Function for parsing quotes
@@ -600,10 +522,103 @@ static void handle_pipeline(char **args) {
 // ---- END HANDLE PIPELINE ----
 
 // ---- HANDLE VAR ------
+// Helper for valid shell variable / identifier first character
+static int is_valid_var_start(char c) {
+    return isalpha((unsigned char)c) || c == '_';
+}
 
+// Helper for valid subsequent characters in a shell variable / identifier
+static int is_valid_var_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+// Expand $VAR using getenv() into `out` while keeping single-quoted $VAR literal
+static int expand_vars(const char *input, char *out, size_t out_size) {
+    size_t in_idx = 0;
+    size_t out_idx = 0;
+    int in_single_quotes = 0;
+    int in_double_quotes = 0;
+
+    while (input[in_idx] != '\0') {
+        char c = input[in_idx];
+
+        // Track single quotes unless already inside double quotes
+        if (c == '\'' && !in_double_quotes) {
+            in_single_quotes = !in_single_quotes;
+            if (out_idx + 1 >= out_size) return -1;
+            out[out_idx++] = c;
+            in_idx++;
+            continue;
+        }
+
+        // Track double quotes unless already inside single quotes
+        if (c == '"' && !in_single_quotes) {
+            in_double_quotes = !in_double_quotes;
+            if (out_idx + 1 >= out_size) return -1;
+            out[out_idx++] = c;
+            in_idx++;
+            continue;
+        }
+
+        // Expand $VAR outside single quotes (both unquoted and double-quoted)
+        if (c == '$' && !in_single_quotes && is_valid_var_start(input[in_idx + 1])) {
+            size_t start = in_idx + 1;
+            size_t end = start;
+            while (is_valid_var_char(input[end])) {
+                end++;
+            }
+
+            size_t name_len = end - start;
+            char var_name[256];
+            if (name_len >= sizeof(var_name)) {
+                fprintf(stderr, "minishell: variable name too long\n");
+                return -1;
+            }
+            memcpy(var_name, input + start, name_len);
+            var_name[name_len] = '\0';
+
+            // Look up variable value; unset variables expand to nothing
+            const char *val = getenv(var_name);
+            if (val != NULL) {
+                size_t val_len = strlen(val);
+                if (out_idx + val_len >= out_size) {
+                    fprintf(stderr, "minishell: expanded line too long\n");
+                    return -1;
+                }
+                memcpy(out + out_idx, val, val_len);
+                out_idx += val_len;
+            }
+
+            in_idx = end;
+            continue;
+        }
+
+        if (out_idx + 1 >= out_size) {
+            fprintf(stderr, "minishell: input line too long\n");
+            return -1;
+        }
+        out[out_idx++] = c;
+        in_idx++;
+    }
+
+    out[out_idx] = '\0';
+    return 0;
+}
 // ---- END HANDLE VAR ----
+
+// ---- HANDLE READLINE ----
+// Helper to check for at least one non-whitespace character
+static int has_non_whitespace(const char *s) {
+    for (size_t i = 0; s[i] != '\0'; i++) {
+        if (!isspace((unsigned char)s[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// ---- END HANDLE READLINE ----
 int main(void) {
-    char input[MAX_LINE];
     char expanded[MAX_LINE];
     char prev_dir[MAX_LINE] = "";
 
@@ -628,30 +643,35 @@ int main(void) {
     while(1) {
         // --- FETCH CURRENT WORKING DIRECTORY ---
         char cwd[1024];
+        char prompt[1056];
         if (getcwd(cwd, sizeof(cwd)) != NULL) {
-            printf("minishell:%s$ ", cwd);
+            snprintf(prompt, sizeof(prompt), "minishell:%s$ ", cwd);
         } else {
             // print prompt
-            printf("minishell> ");
+            snprintf(prompt, sizeof(prompt), "minishell> ");
         }
-        
-        fflush(stdout);
 
-        // Read input
-        if (fgets(input, MAX_LINE, stdin) == NULL) {
+        // Read input with readline
+        char *line = readline(prompt);
+        if (line == NULL) {
+            printf("\n");
             break; // Handle EOF (Ctrl+D)
         }
 
-        // Remove the trailing newline character left by fgets
-        input[strcspn(input, "\n")] = 0;
-
         // if user pressed enter, loop again
-        if (strlen(input) == 0) {
+        if (strlen(line) == 0) {
+            free(line);
             continue;
         }
 
+        // Save non-whitespace commands to history
+        if (has_non_whitespace(line)) {
+            add_history(line);
+        }
+
         // Expand $VAR before quote stripping so quote boundaries stay clear
-        if (expand_vars(input, expanded, sizeof(expanded)) < 0) {
+        if (expand_vars(line, expanded, sizeof(expanded)) < 0) {
+            free(line);
             continue;
         }
 
@@ -661,27 +681,32 @@ int main(void) {
 
         // if the line was just spaces/empty after parsing, loop again
         if (args[0] == NULL) {
+            free(line);
             continue;
         }
 
         // if user types 'exit', quit the shell
         if (strcmp(args[0], "exit") == 0) {
+            free(line);
             break;
         }
 
         // --- HANDLE 'cd' BUILT-IN ---
         if (strcmp(args[0], "cd") == 0) {
             handle_cd(args, prev_dir, sizeof(prev_dir));
+            free(line);
             continue; // skip fork/exec and loop back to prompt
         }
 
         // --- HANDLE 'export' AND 'unset' BUILT-INS (PARENT PROCESS) ---
         if (strcmp(args[0], "export") == 0) {
             handle_export(args);
+            free(line);
             continue;
         }
         if (strcmp(args[0], "unset") == 0) {
             handle_unset(args);
+            free(line);
             continue;
         }
 
@@ -710,6 +735,7 @@ int main(void) {
 
         if (has_pipe) {
             handle_pipeline(args);
+            free(line);
             continue;
         }
 
@@ -717,10 +743,12 @@ int main(void) {
         Redirection redirs[MAX_REDIRS];
         int redir_count = extract_redirections(args, redirs, MAX_REDIRS);
         if (redir_count < 0) {
+            free(line);
             continue;
         }
         // Skip execution if line only contained redirections (e.g., `> out.txt`)
         if (args[0] == NULL) {
+            free(line);
             continue;
         }
 
@@ -731,6 +759,7 @@ int main(void) {
             } else {
                 print_pwd();
             }
+            free(line);
             continue;
         }
         if (strcmp(args[0], "echo") == 0) {
@@ -739,6 +768,7 @@ int main(void) {
             } else {
                 print_echo(args);
             }
+            free(line);
             continue;
         }
         
@@ -747,6 +777,7 @@ int main(void) {
 
         if (pid < 0) {
             perror("Fork failed");
+            free(line);
             continue; // stay in shell instead of exiting on fork error
         } else if (pid == 0) {
             // --- CHILD PROCESS ---
@@ -778,6 +809,8 @@ int main(void) {
                 printf("\n"); // keep prompt on a new line after signal kill
             }
         }
+
+        free(line);
     }
 
     return 0;
